@@ -17,6 +17,8 @@ import os
 import sys
 import time
 import subprocess
+import signal
+import shutil
 from pathlib import Path
 import argparse
 import hashlib
@@ -74,6 +76,51 @@ class PopenProc:
             except subprocess.TimeoutExpired:
                 self.p.kill()
         self.p = None
+
+
+def start_capture(pcap_file: str, iface: str = 'lo0', bpf: str = 'udp and host 127.0.0.1'):
+    """Start tcpdump to write to pcap_file. Returns subprocess.Popen or None on failure."""
+    tcpdump = shutil.which('tcpdump')
+    if not tcpdump:
+        print("tcpdump not found on PATH; skipping packet capture")
+        return None
+
+    cmd = [tcpdump, '-i', iface, '-s', '0', '-w', pcap_file, bpf]
+    try:
+        # Try to start without sudo first (may fail with permission).
+        p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        time.sleep(0.4)
+        if p.poll() is not None:
+            # process exited quickly — read stderr and inform user to start tcpdump manually
+            _, err = p.communicate()
+            print(f"tcpdump failed to start: {err.decode().strip()}")
+            print("Permission to capture may be required. Please start tcpdump manually in another terminal, for example:\n")
+            example = f"sudo {tcpdump} -i {iface} -s 0 -w {pcap_file} '{bpf}'"
+            print(example)
+            return None
+        print(f"Started packet capture to {pcap_file} (iface={iface})")
+        return p
+    except Exception as e:
+        print(f"Error starting tcpdump: {e}")
+        return None
+
+
+def stop_capture(proc: subprocess.Popen):
+    """Stop tcpdump process started by start_capture."""
+    if not proc:
+        return
+    try:
+        # Try graceful stop so pcap is flushed
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            proc.kill()
+    finally:
+        print("Stopped packet capture")
 
 def run_baseline_demo(server_root: Path) -> bool:
     print("\n=== Baseline TFTP Demo ===")
@@ -191,6 +238,9 @@ def main():
     ap.add_argument("--only", choices=["baseline","secure","both"], default="both")
     ap.add_argument("--psk", default="000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f",
                     help="Hex-encoded 32-byte PSK for secure demo")
+    ap.add_argument("--capture-file", default=None, help="If set, start tcpdump and write capture to this pcap file")
+    ap.add_argument("--capture-iface", default="lo0", help="Interface to capture on (default lo0)")
+    ap.add_argument("--capture-filter", default="udp and host 127.0.0.1", help="BPF filter for tcpdump (default: 'udp and host 127.0.0.1')")
     args = ap.parse_args()
 
     demo_dir = HERE / "demo_files"
@@ -203,11 +253,21 @@ def main():
 
     create_demo_files(demo_dir)
 
+    # Optionally start packet capture
+    pcap_proc = None
+    if args.capture_file:
+        pcap_proc = start_capture(args.capture_file, iface=args.capture_iface, bpf=args.capture_filter)
+
     passed = True
-    if args.only in ("baseline", "both"):
-        passed = run_baseline_demo(demo_dir) and passed
-    if args.only in ("secure", "both"):
-        passed = run_secure_demo(demo_dir, args.psk) and passed
+    try:
+        if args.only in ("baseline", "both"):
+            passed = run_baseline_demo(demo_dir) and passed
+        if args.only in ("secure", "both"):
+            passed = run_secure_demo(demo_dir, args.psk) and passed
+    finally:
+        # Ensure capture is stopped and pcap flushed
+        if pcap_proc:
+            stop_capture(pcap_proc)
 
     print("\n" + "="*60)
     print(f"DEMO RESULT: {'SUCCESS' if passed else 'FAIL'}")
