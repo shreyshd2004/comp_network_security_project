@@ -30,6 +30,12 @@ cd baseline_tftp
 python tftp_client.py
 ```
 
+### Running demo_tftp_secure.py
+Use this command `python demo_tftp_secure.py --only secure \
+  --psk 000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f`
+
+Make sure you have cryptography library installed in your environment. If not you can rune pip install cryptography
+
 ## Requirements
 
 - Python 3.7+
