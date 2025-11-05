@@ -89,13 +89,7 @@ class SimpleTFTPServer:
         
         # --- CRITICAL FIX: Use built-in DH parameters ---
         if HAVE_CRYPTO:
-            try:
-                # Load standard 2048-bit parameters (Group 14) for maximum compatibility
-                self.dh_params = dh.get_builtin_parameters(2048)
-            except Exception as e:
-                # Fallback to manual creation if built-in fails, but log a warning
-                print(f"Warning: Failed to load built-in DH parameters, falling back to manual: {e}")
-                self.dh_params = dh.DHParameterNumbers(DH_PRIME_P, DH_GENERATOR_G).parameters(backend=default_backend())
+            self.dh_params = dh.DHParameterNumbers(DH_PRIME_P, DH_GENERATOR_G).parameters(backend=default_backend())
         else:
             self.dh_params = None
         # ------------------------------------------------
