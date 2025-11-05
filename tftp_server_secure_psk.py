@@ -89,7 +89,8 @@ class SimpleTFTPServer:
         
         # --- CRITICAL FIX: Use built-in DH parameters ---
         if HAVE_CRYPTO:
-            self.dh_params = dh.DHParameterNumbers(DH_PRIME_P, DH_GENERATOR_G).parameters(backend=default_backend())
+            numbers = dh.DHParameterNumbers(DH_PRIME_P, DH_GENERATOR_G)
+            self.dh_params = numbers.parameters(default_backend())
         else:
             self.dh_params = None
         # ------------------------------------------------
