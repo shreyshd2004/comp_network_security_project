@@ -25,20 +25,26 @@ import hashlib
 
 HERE = Path(__file__).resolve().parent
 BASELINE_DIR = HERE / "baseline_tftp"
-SECURE_CLIENT = HERE / "tftp_client_secure_psk.py"
-SECURE_SERVER = HERE / "tftp_server_secure_psk.py"
 
-# Make sure baseline client import works (assuming baseline is just a copy of the main code without crypto features)
+# --- IMPORTANT: These paths must match the file names from previous responses ---
+SECURE_CLIENT = HERE / "tftp_client_secure_psk.py" 
+SECURE_SERVER = HERE / "tftp_server_secure_psk.py" 
+
+# Make sure baseline client import works (assuming the baseline is available)
 try:
     sys.path.insert(0, str(BASELINE_DIR))
-    from tftp_client import TFTPClient  # baseline client
+    from tftp_client import TFTPClient  # baseline client class
 except ImportError:
-    # If the import fails, fall back to using the main script file
-    print("Warning: Could not import baseline client. Relying on main tftp_client.py.")
-    pass
+    # Fallback to importing from our generated secure client/server files 
+    # if the dedicated baseline client isn't available.
+    print("Warning: Could not import baseline tftp_client. Falling back to secure implementation.")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("secure_client_mod", str(SECURE_CLIENT))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    TFTPClient = getattr(mod, "TFTPClient")
 
-def sha256_file(p: Path):
-    """Calculates the SHA256 hash of a file."""
+def sha256_file(p):
     h = hashlib.sha256()
     with open(p, "rb") as f:
         for chunk in iter(lambda: f.read(1<<16), b""):
@@ -149,7 +155,7 @@ def run_tftp_test(client, test_name: str, server_root: Path, client_root: Path) 
         if src_hash == dst_hash:
             print(f"✓ Integrity OK for data.bin ({src_hash[:12]}...)")
         else:
-            print("✗ Integrity mismatch for data.bin")
+            print(f"✗ Integrity mismatch for data.bin. Expected {src_hash}, Got {dst_hash}")
             ok = False
     else:
         print("✗ Integrity check skipped (data.bin download failed)")
@@ -231,6 +237,7 @@ def main():
     #    pcap_proc = start_capture(args.capture_file, iface=args.capture_iface, bpf=args.capture_filter)
 
     passed = True
+    
     try:
         if args.only in ("baseline", "all"):
             passed = run_baseline_demo(demo_dir, client_root) and passed
@@ -255,3 +262,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+

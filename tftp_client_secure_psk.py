@@ -54,7 +54,7 @@ DH_GENERATOR_G = 2
 DH_PUBLIC_KEY_SIZE= 256 # 2048 bits / 8 bytes
 
 
-# Crypto (optional)
+# Crypto (mandatory for secure modes)
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives import hashes, hmac
@@ -64,18 +64,36 @@ try:
 except Exception:
     HAVE_CRYPTO = False
 
+# --- Diffie-Hellman Constants ---
+# CRITICAL FIX: Manually define the standardized 2048-bit prime (Group 14) for older library versions.
+DH_P_HEX = (
+    'FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E08'
+    '8A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B'
+    '302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A'
+    '637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649'
+    '286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD2'
+    '4CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C'
+    '354E4ABC9804F1746C08CA18217C32905E462E36CE3A3348806EC1CDB'
+    '19B27A9B79EEA5D4D5460E7941CB5C9778DDC432DAFD3E7356ECFD132'
+    '20CC51F2D6BEE9487DA452E2080000000000009941'
+)
+DH_P = int(DH_P_HEX, 16)
+DH_G = 2
+DH_KEY_SIZE = 256 # 2048 bits / 8 bytes
+
 def hmac_sha256(key: bytes, msg: bytes) -> bytes:
-    h = hmac.HMAC(key, hashes.SHA256())
+    """Computes HMAC-SHA256."""
+    h = hmac.HMAC(key, hashes.SHA256(), default_backend())
     h.update(msg)
     return h.finalize()
 
-def make_nonce(psk: bytes, filename: str, direction: str, block_no: int) -> bytes:
+def make_nonce(shared_key: bytes, filename: str, direction: str, block_no: int) -> bytes:
     """
-    12-byte GCM nonce derived from (psk, filename, direction, block_no).
+    12-byte GCM nonce derived from (shared_key, filename, direction, block_no).
     direction: 'dl' for server->client (GET), 'ul' for client->server (PUT)
     """
     ctx = f"{direction}|{filename}|{block_no}".encode('utf-8')
-    return hmac_sha256(psk, ctx)[:12]
+    return hmac_sha256(shared_key, ctx)[:12]
 
 class TFTPClient:
     def __init__(self, server_host='localhost', server_port=69, mode='baseline', psk_hex=None):
@@ -186,24 +204,36 @@ class TFTPClient:
 
     def get_file(self, remote_filename: str, local_filename: str = None) -> bool:
         """Download a file from the TFTP server"""
-        # fresh socket per transfer (avoid cross-talk)
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(DEFAULT_TIMEOUT)
-
-        if local_filename is None:
-            local_filename = remote_filename
-
+        if local_filename is None: local_filename = remote_filename
+        server_initial_addr = (self.server_host, self.server_port)
+        transfer_addr = None
+        self.shared_key = None
+        rrq_packet = struct.pack('>H', OPCODE_RRQ) + remote_filename.encode('ascii') + b'\x00' + b'octet\x00'
+        
         try:
-            # RRQ: opcode + filename + 0 + "octet" + 0
-            rrq_packet = struct.pack('>H', OPCODE_RRQ)
-            rrq_packet += remote_filename.encode('ascii') + b'\x00'
-            rrq_packet += b'octet\x00'
-            sock.sendto(rrq_packet, (self.server_host, self.server_port))
+            # 1. Send initial RRQ (retry loop for handshake initiation)
+            initial_data, initial_addr = b'', None
+            for _ in range(20): # INCREASED RETRY COUNT FOR ROBUST DH INITIATION
+                sock.sendto(rrq_packet, server_initial_addr)
+                try:
+                    initial_data, initial_addr = sock.recvfrom(MAX_PACKET_SIZE)
+                    # Check if the response came from a new TID (the transfer socket)
+                    if initial_addr[1] != self.server_port: 
+                        break
+                    # Ignore packets from the initial server port after the first send
+                except socket.timeout:
+                    continue
+            else:
+                print("Timeout waiting for server to initiate transfer or DH exchange.")
+                return False
 
             with open(local_filename, 'wb') as f:
                 expected_block = 1
                 transfer_addr = None  # will lock on first DATA or DH_KEY
 
+            with open(local_filename, 'wb') as f:
                 while True:
                     try:
                         data, addr = sock.recvfrom(MAX_PACKET_SIZE)
@@ -225,7 +255,7 @@ class TFTPClient:
                     opcode, block_num = struct.unpack('>HH', data[:4])
 
                     if opcode == OPCODE_ERROR:
-                        error_code, error_msg = self.parse_error(data)
+                        error_code, error_msg = self._parse_error(data)
                         print(f"Server error {error_code}: {error_msg}")
                         return False
 
@@ -265,6 +295,7 @@ class TFTPClient:
 
                     # Ignore out-of-order/duplicate blocks; re-ACK last good to prompt retransmit
                     if block_num != expected_block:
+                        # Ignore out-of-order/duplicate blocks; re-ACK last good
                         sock.sendto(struct.pack('>HH', OPCODE_ACK, max(0, expected_block - 1)), transfer_addr)
                         continue
 
@@ -282,8 +313,8 @@ class TFTPClient:
                             print(f"Decryption failed for block {block_num}: {e}. Retrying.")
                             sock.sendto(struct.pack('>HH', OPCODE_ACK, expected_block - 1), transfer_addr)
                             continue
+                        
                         f.write(file_data)
-                        # ACK current block
                         sock.sendto(struct.pack('>HH', OPCODE_ACK, block_num), transfer_addr)
                         # print(f"ACK: {block_num}")
                         if len(file_data) < SECURE_PLAINTEXT_BLOCK:
@@ -291,8 +322,7 @@ class TFTPClient:
                     else:
                         f.write(payload)
                         sock.sendto(struct.pack('>HH', OPCODE_ACK, block_num), transfer_addr)
-                        if len(payload) < DEFAULT_BLOCK_SIZE:
-                            break
+                        if len(payload) < DEFAULT_BLOCK_SIZE: break
 
                     expected_block += 1
 
@@ -301,6 +331,10 @@ class TFTPClient:
 
         except socket.timeout:
             print("Timeout waiting for server response")
+            return False
+        except RuntimeError as e:
+             # Catch explicit DH failure from _derive_shared_secret
+            print(f"Error downloading file: {e}")
             return False
         except Exception as e:
             print(f"Error downloading file: {e}")
@@ -319,10 +353,14 @@ class TFTPClient:
             print(f"Local file not found: {local_filename}")
             return False
 
-        # fresh socket per transfer
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(DEFAULT_TIMEOUT)
-
+        server_initial_addr = (self.server_host, self.server_port)
+        transfer_addr = None
+        self.shared_key = None
+        
+        wrq_packet = struct.pack('>H', OPCODE_WRQ) + remote_filename.encode('ascii') + b'\x00' + b'octet\x00'
+        
         try:
             # WRQ: opcode + filename + 0 + "octet" + 0
             wrq_packet = struct.pack('>H', OPCODE_WRQ)
@@ -371,16 +409,38 @@ class TFTPClient:
                     if transfer_addr:
                         break
                 except socket.timeout:
-                    # retry WRQ
                     continue
-
-            if not transfer_addr:
-                print("Timeout waiting for server response")
+            else:
+                print("Timeout waiting for server to initiate transfer or DH exchange.")
                 return False
 
-            # Send file blocks
+            # 2. Perform DH exchange if necessary
+            if self.mode == 'secure_dh':
+                result = self._perform_dh_key_exchange(sock, initial_data, initial_addr)
+                if not result: return False
+                self.shared_key, transfer_addr = result
+                # After DH, we expect ACK(0) next.
+                current_ack_block = 0 
+                initial_data = b''
+            else:
+                transfer_addr = initial_addr
+                # For baseline/PSK, we expect ACK(0) here
+                op, blk = struct.unpack('>HH', initial_data[:4])
+                if op == OPCODE_ERROR:
+                    error_code, error_msg = self._parse_error(initial_data)
+                    print(f"Server error {error_code}: {error_msg}")
+                    return False
+                if op != OPCODE_ACK or blk != 0:
+                    print(f"Expected ACK 0, got {op} {blk}")
+                    return False
+                current_ack_block = 0
+                initial_data = b'' # consumed initial ACK
+
+            # 3. Send file blocks
             with open(local_filename, 'rb') as f:
                 block_num = 1
+                transfer_key = self.shared_key if self.mode == 'secure_dh' else self.psk
+                
                 while True:
                     pt = f.read(SECURE_PLAINTEXT_BLOCK if self.mode in ['secure', 'secure_dh'] else DEFAULT_BLOCK_SIZE)
                     if pt is None:
@@ -416,7 +476,7 @@ class TFTPClient:
                             
                         ack_opcode, ack_block = struct.unpack('>HH', ack_data[:4])
                         if ack_opcode == OPCODE_ERROR:
-                            error_code, error_msg = self.parse_error(ack_data)
+                            error_code, error_msg = self._parse_error(ack_data)
                             print(f"Server error {error_code}: {error_msg}")
                             return False
                         
@@ -445,6 +505,10 @@ class TFTPClient:
         except socket.timeout:
             print("Timeout waiting for server response")
             return False
+        except RuntimeError as e:
+             # Catch explicit DH failure from _derive_shared_secret
+            print(f"Error uploading file: {e}")
+            return False
         except Exception as e:
             print(f"Error uploading file: {e}")
             return False
@@ -453,19 +517,9 @@ class TFTPClient:
             self.session_key = None
 
 
-    def parse_error(self, data: bytes) -> Tuple[int, str]:
-        """Parse error packet"""
-        try:
-            error_code = struct.unpack('>H', data[2:4])[0]
-            error_msg = data[4:-1].decode('ascii')  # Remove null terminator
-            return error_code, error_msg
-        except:
-            return ERROR_NOT_DEFINED, "Unknown error"
-
-
 def main():
     """Main function for TFTP client"""
-    parser = argparse.ArgumentParser(description='Basic TFTP Client (+ secure mode)')
+    parser = argparse.ArgumentParser(description='Secure TFTP Client (PSK + DH)')
     parser.add_argument('--server', default='localhost', help='TFTP server host')
     parser.add_argument('--port', type=int, default=69, help='TFTP server port')
     parser.add_argument('--mode', choices=['baseline','secure', 'secure_dh'], default='baseline', help='Transfer mode')
@@ -478,8 +532,13 @@ def main():
     if args.mode == 'secure' and not args.psk:
         print("Error: --psk is required for --mode secure")
         sys.exit(1)
+    if args.mode == 'secure_dh' and not HAVE_CRYPTO:
+        print("Error: DH mode requires the cryptography library.")
+        sys.exit(1)
 
-    client = TFTPClient(args.server, args.port, args.mode, args.psk)
+    # Use port 6969 in the demo environment for consistency
+    port = args.port if args.port != 69 else 6969
+    client = TFTPClient(args.server, port, args.mode, args.psk)
 
     try:
         if args.action == 'get':
@@ -498,3 +557,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
