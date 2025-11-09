@@ -37,6 +37,7 @@ MAX_PACKET_SIZE = 4 + 512 + 16 + 10 # Opcode(2) + Block(2) + Max CT(528) + Buffe
 
 # --- Diffie-Hellman Constants ---
 # CRITICAL FIX: Manually define the standardized 2048-bit prime (Group 14) for older library versions.
+"""
 DH_P_HEX = (
     'FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E08'
     '8A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B'
@@ -48,9 +49,28 @@ DH_P_HEX = (
     '19B27A9B79EEA5D4D5460E7941CB5C9778DDC432DAFD3E7356ECFD132'
     '20CC51F2D6BEE9487DA452E2080000000000009941'
 )
+
 DH_PRIME_P = int(DH_P_HEX, 16)
 DH_GENERATOR_G = 2
 DH_PUBLIC_KEY_SIZE= 256 # 2048 bits / 8 bytes
+"""
+# RFC 3526 MODP 2048-bit (Group 14)
+DH_P_HEX = (
+    "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1"
+    "29024E088A67CC74020BBEA63B139B22514A08798E3404DD"
+    "EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245"
+    "E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED"
+    "EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381"
+    "FFFFFFFFFFFFFFFF"
+)
+
+# or on server:
+DH_PRIME_P = int(DH_P_HEX, 16)   # server file
+DH_GENERATOR_G = 2
+# and use self.dh_pub_size wherever you currently use DH_PUBLIC_KEY_SIZE
+#self.dh_pub_size = (self.dh_params.parameter_numbers().p.bit_length() + 7) // 8
+DH_KEY_SIZE= 256 # 2048 bits / 8 bytes
+
 
 # Crypto (optional)
 try:
@@ -95,7 +115,8 @@ class SimpleTFTPServer:
             except Exception as e:
                 # Fallback to manual creation if built-in fails, but log a warning
                 print(f"Warning: Failed to load built-in DH parameters, falling back to manual: {e}")
-                self.dh_params = dh.DHParameterNumbers(DH_PRIME_P, DH_GENERATOR_G).parameters(backend=default_backend())
+                #self.dh_params = dh.DHParameterNumbers(DH_PRIME_P, DH_GENERATOR_G).parameters(backend=default_backend())
+                self.dh_params = dh.DHParameterNumbers(DH_PRIME_P, DH_GENERATOR_G).parameters()
         else:
             self.dh_params = None
         # ------------------------------------------------
@@ -123,8 +144,9 @@ class SimpleTFTPServer:
                 int.from_bytes(client_public_key_bytes, 'big'),
                 private_key.parameters().parameter_numbers() 
             )
-            client_public_key = default_backend().load_dh_public_numbers(client_public_numbers)
-
+            #client_public_key = default_backend().load_dh_public_numbers(client_public_numbers)
+            client_public_key = client_public_numbers.public_key()
+            
             # Perform DH key agreement
             shared_secret = private_key.exchange(client_public_key)
 
@@ -259,8 +281,9 @@ class SimpleTFTPServer:
             server_public_key = server_private_key.public_key()
             
             # Serialize the public number (Y) as a fixed-size byte string
-            server_public_key_bytes = server_public_key.public_numbers().y.to_bytes(DH_PUBLIC_KEY_SIZE, 'big')
-
+            server_public_key_bytes = server_public_key.public_numbers().y.to_bytes(DH_KEY_SIZE, 'big')
+            #server_public_key_bytes = server_public_key.public_numbers().y.to_bytes(self.dh_pub_size, 'big')
+            
             # 2. Send Server's Public Key (S_PUB) in DH_KEY packet
             s_pub_packet = struct.pack('>H', OPCODE_DH_KEY) + server_public_key_bytes
             print(f"Sent S_PUB. Waiting for C_PUB from {client_addr}...")
@@ -277,15 +300,26 @@ class SimpleTFTPServer:
                     if addr != client_addr or len(data) < 2:
                         continue
                     
+                    """
                     opcode = struct.unpack('>H', data[:2])[0]
                     
                     if opcode == OPCODE_DH_KEY:
                         client_public_key_bytes = data[2:]
                         # CRITICAL FIX: Check for the exact raw key size
-                        if len(client_public_key_bytes) == DH_PUBLIC_KEY_SIZE:
+                        if len(client_public_key_bytes) == self.dh_pub_size:
                             break
                         else:
                             print(f"Warning: Received DH_KEY packet with incorrect size ({len(client_public_key_bytes)} bytes).")
+                    """
+                    
+                    opcode = struct.unpack('>H', data[:2])[0]
+                    if opcode == OPCODE_DH_KEY:
+                        client_public_key_bytes = data[2:]
+                        if len(client_public_key_bytes) == DH_KEY_SIZE:
+                            break
+                        else:
+                            print(f"Warning: Received DH_KEY packet with incorrect size ({len(client_public_key_bytes)} bytes).")
+                            
                     elif opcode == OPCODE_ERROR:
                         print("Received ERROR during DH setup.")
                         return None
@@ -294,7 +328,7 @@ class SimpleTFTPServer:
                     # Retrying S_PUB ensures the client gets the server's TID
                     continue
             
-            if not client_public_key_bytes or len(client_public_key_bytes) != DH_PUBLIC_KEY_SIZE:
+            if not client_public_key_bytes or len(client_public_key_bytes) != DH_KEY_SIZE:
                 print("Failed to receive C_PUB after multiple retries or key size mismatch.")
                 return None
 
