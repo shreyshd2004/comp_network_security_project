@@ -49,6 +49,7 @@ except Exception:
 
 # --- Diffie-Hellman Constants ---
 # CRITICAL FIX: Manually define the standardized 2048-bit prime (Group 14) for older library versions.
+"""
 DH_P_HEX = (
     'FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E08'
     '8A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B'
@@ -62,7 +63,22 @@ DH_P_HEX = (
 )
 DH_P = int(DH_P_HEX, 16)
 DH_G = 2
+"""
+# RFC 3526 MODP 2048-bit (Group 14)
+DH_P_HEX = (
+    "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1"
+    "29024E088A67CC74020BBEA63B139B22514A08798E3404DD"
+    "EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245"
+    "E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED"
+    "EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381"
+    "FFFFFFFFFFFFFFFF"
+)
+DH_P = int(DH_P_HEX, 16)         # client file
+DH_G = 2
+
 DH_KEY_SIZE = 256 # 2048 bits / 8 bytes
+# and use self.dh_pub_size wherever you currently use DH_PUBLIC_KEY_SIZE
+#self.dh_pub_size = (self.dh_params.parameter_numbers().p.bit_length() + 7) // 8
 
 def hmac_sha256(key: bytes, msg: bytes) -> bytes:
     """Computes HMAC-SHA256."""
@@ -95,7 +111,8 @@ class TFTPClient:
             # Use manual DH ParameterNumbers definition for compatibility
             try:
                 numbers = dh.DHParameterNumbers(DH_P, DH_G)
-                self.dh_parameters = numbers.parameters(default_backend())
+                #self.dh_parameters = numbers.parameters(default_backend())
+                self.dh_parameters = numbers.parameters()
             except Exception as e:
                 # Catch failures in parameter creation itself
                 raise SystemExit(f"Failed to create DH parameters: {e}")
@@ -127,7 +144,8 @@ class TFTPClient:
                 int.from_bytes(peer_public_key_bytes, 'big'),
                 client_private_key.parameters().parameter_numbers() # Use params from client's private key
             )
-            peer_public_key = default_backend().load_dh_public_numbers(peer_public_numbers)
+            #peer_public_key = default_backend().load_dh_public_numbers(peer_public_numbers)
+            peer_public_key = peer_public_numbers.public_key()
             
             # Perform DH key agreement
             shared_secret = client_private_key.exchange(peer_public_key)
@@ -168,12 +186,20 @@ class TFTPClient:
         # 2. Process initial_packet (S_PUB)
         op, = struct.unpack('>H', initial_packet[:2])
         
+        """
         # CRITICAL FIX: Check expected length (2 bytes opcode + 256 bytes raw key)
-        if op != OPCODE_DH_KEY or len(initial_packet) != 2 + DH_KEY_SIZE:
+        if op != OPCODE_DH_KEY or len(initial_packet) != 2 + self.dh_pub_size:
              print("Received unexpected packet instead of S_PUB.")
-             return None
-
+             return None  
         server_public_key_bytes = initial_packet[2:]
+        """
+        
+        op, = struct.unpack('>H', initial_packet[:2])
+        if op != OPCODE_DH_KEY or len(initial_packet) != 2 + DH_KEY_SIZE:
+            print("Received unexpected packet instead of S_PUB.")
+            return None
+        server_public_key_bytes = initial_packet[2:]
+                
         
         # 3. Derive Shared Key using C_PUB as salt/context (MUST MATCH SERVER)
         shared_key = self._derive_shared_secret(
