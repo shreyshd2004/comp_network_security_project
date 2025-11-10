@@ -1,0 +1,10 @@
+proto,file,runs,median_latency_s,p90_latency_s,median_overhead_pct,median_goodput_Mbps,est_count
+SFTP_cold,f_2m.bin,1,5.74,5.74,,2.9228599303135887,1
+TFTP,f_2m.bin,5,1.4,1.5,118.85,11.984,0
+sTFTP_DH,f_2m.bin,5,3.55,3.764,366.62,4.726,0
+SFTP_cold,f_32k.bin,1,13.95,13.95,,0.018791684587813624,1
+TFTP,f_32k.bin,5,0.43,0.436,148.1,0.61,0
+sTFTP_DH,f_32k.bin,5,1.21,1.226,418.15,0.217,0
+SFTP_cold,f_4k.bin,1,6.88,6.88,,0.0047627906976744185,1
+TFTP,f_4k.bin,5,0.42,0.45399999999999996,349.44,0.078,0
+sTFTP_DH,f_4k.bin,5,1.2,1.218,763.99,0.027,0
